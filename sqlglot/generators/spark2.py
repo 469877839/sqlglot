@@ -136,6 +136,10 @@ class Spark2Generator(HiveGenerator):
     ALTER_SET_TYPE = "TYPE"
     PARSE_JSON_NAME: str | None = None
 
+    # Spark TIMESTAMP is TIMESTAMP_LTZ: it stores an absolute instant rendered in
+    # the session time zone, so it preserves the semantics of tz-aware source types.
+    TZ_AWARE_TYPE_SQL = HiveGenerator.TZ_AWARE_TYPE_SQL | {"TIMESTAMP"}
+
     PROPERTIES_LOCATION = {
         **HiveGenerator.PROPERTIES_LOCATION,
         exp.EngineProperty: exp.Properties.Location.UNSUPPORTED,

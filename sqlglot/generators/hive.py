@@ -5,6 +5,7 @@ import typing as t
 from functools import partial
 
 from sqlglot import exp, generator, transforms
+from sqlglot.diagnostics import Category, LossKind
 from sqlglot.dialects.dialect import (
     array_sort_order,
     DATE_ADD_OR_SUB,
@@ -510,6 +511,17 @@ class HiveGenerator(generator.Generator):
         elif (
             not self.SUPPORTS_TEMPORAL_PRECISION and expression.this in exp.DataType.TEMPORAL_TYPES
         ):
+            if expression.expressions:
+                self.diagnose(
+                    Category.TEMPORAL,
+                    expression,
+                    action=f"dropped temporal precision of {expression.this.value}",
+                    loss=LossKind.PRECISION,
+                    message=(
+                        f"{expression.this.value} precision is not supported by "
+                        f"{self.dialect.__class__.__name__}; dropping it"
+                    ),
+                )
             expression.set("expressions", None)
         elif expression.is_type("float"):
             size_expression = expression.find(exp.DataTypeParam)

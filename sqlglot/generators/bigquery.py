@@ -36,6 +36,7 @@ from sqlglot.helper import seq_get
 
 if t.TYPE_CHECKING:
     from sqlglot.dialects.dialect import DialectType
+    from sqlglot.diagnostics import ConversionPolicy
 
 logger = logging.getLogger("sqlglot")
 
@@ -366,6 +367,10 @@ class BigQueryGenerator(generator.Generator):
     SUPPORTS_EXPLODING_PROJECTIONS = False
     EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
     SUPPORTS_UNIX_SECONDS = True
+
+    # BigQuery TIMESTAMP stores an absolute instant (rendered in UTC), so it
+    # preserves the semantics of tz-aware source types.
+    TZ_AWARE_TYPE_SQL = generator.Generator.TZ_AWARE_TYPE_SQL | {"TIMESTAMP"}
     DECLARE_DEFAULT_ASSIGNMENT = "DEFAULT"
 
     SAFE_JSON_PATH_KEY_RE = re.compile(r"^[\-\w]*$")
@@ -701,6 +706,7 @@ class BigQueryGenerator(generator.Generator):
         max_text_width: int = 80,
         comments: bool = True,
         dialect: DialectType = None,
+        diagnostics: ConversionPolicy | None = None,
     ) -> None:
         super().__init__(
             pretty=pretty,
@@ -715,6 +721,7 @@ class BigQueryGenerator(generator.Generator):
             max_text_width=max_text_width,
             comments=comments,
             dialect=dialect,
+            diagnostics=diagnostics,
         )
 
         self._escaped_identifier_end = r"\`"

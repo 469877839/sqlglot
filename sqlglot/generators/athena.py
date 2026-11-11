@@ -85,6 +85,7 @@ def _generator_kwargs(
     leading_comma: bool,
     max_text_width: int,
     comments: bool,
+    diagnostics: t.Any = None,
 ) -> dict[str, t.Any]:
     kwargs: dict[str, t.Any] = {
         "pretty": pretty,
@@ -100,6 +101,8 @@ def _generator_kwargs(
     }
     if unsupported_level is not None:
         kwargs["unsupported_level"] = unsupported_level
+    if diagnostics is not None:
+        kwargs["diagnostics"] = diagnostics
     return kwargs
 
 
@@ -150,6 +153,7 @@ class AthenaGenerator(AthenaTrinoGenerator):
         dialect: t.Any = None,
         hive: t.Any = None,
         trino: t.Any = None,
+        diagnostics: t.Any = None,
     ) -> None:
         import sqlglot.dialects.hive as hive_mod
         import sqlglot.dialects.trino as trino_mod
@@ -169,6 +173,7 @@ class AthenaGenerator(AthenaTrinoGenerator):
             leading_comma,
             max_text_width,
             comments,
+            diagnostics,
         )
 
         generator.Generator.__init__(self, dialect=dialect, **kwargs)
@@ -179,6 +184,10 @@ class AthenaGenerator(AthenaTrinoGenerator):
 
     def generate(self, expression: exp.Expr, copy: bool = True) -> str:
         if _generate_as_hive(expression):
-            return self._hive_generator.generate(expression, copy=copy)
+            sql = self._hive_generator.generate(expression, copy=copy)
+            self.diagnostics = self._hive_generator.diagnostics
+            return sql
 
-        return self._trino_generator.generate(expression, copy=copy)
+        sql = self._trino_generator.generate(expression, copy=copy)
+        self.diagnostics = self._trino_generator.diagnostics
+        return sql

@@ -3,6 +3,7 @@ from __future__ import annotations
 import typing as t
 
 from sqlglot import exp, generator, transforms
+from sqlglot.diagnostics import Category, LossKind
 from sqlglot.dialects.dialect import (
     array_sort_order,
     array_slice_to_slice_sql,
@@ -512,7 +513,13 @@ class PrestoGenerator(generator.Generator):
     def datatype_sql(self, expression: exp.DataType) -> str:
         if not self.SUPPORTS_TEMPORAL_PRECISION and expression.this in exp.DataType.TEMPORAL_TYPES:
             if expression.expressions and expression.expressions[0].name != "3":
-                self.unsupported("Presto only supports millisecond precision for temporal types")
+                self.diagnose(
+                    Category.TEMPORAL,
+                    expression,
+                    action=f"dropped temporal precision of {expression.this.value}",
+                    loss=LossKind.PRECISION,
+                    message="Presto only supports millisecond precision for temporal types",
+                )
             expression.set("expressions", None)
         return super().datatype_sql(expression)
 

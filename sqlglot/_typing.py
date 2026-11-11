@@ -8,6 +8,7 @@ if t.TYPE_CHECKING:
     from sqlglot import exp
     from typing_extensions import ParamSpec
     from sqlglot.dialects.dialect import DialectType
+    from sqlglot.diagnostics import ConversionPolicy
     from sqlglot.errors import ErrorLevel
 
     P = ParamSpec("P")
@@ -57,6 +58,7 @@ class GeneratorNoDialectArgs(t.TypedDict, total=False):
     leading_comma: bool
     max_text_width: int
     comments: bool
+    diagnostics: ConversionPolicy | None
 
 
 class GeneratorArgs(GeneratorNoDialectArgs, _DialectArg, total=False):

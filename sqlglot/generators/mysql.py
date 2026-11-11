@@ -125,6 +125,9 @@ class MySQLGenerator(generator.Generator):
     LOCKING_READS_SUPPORTED = True
     CAST_TO_INT_ROUNDS = True
     NULL_ORDERING_SUPPORTED: bool | None = None
+    # MySQL TIMESTAMP stores an absolute instant (converted from the session time
+    # zone), so it preserves the semantics of tz-aware source types.
+    TZ_AWARE_TYPE_SQL = generator.Generator.TZ_AWARE_TYPE_SQL | {"TIMESTAMP"}
     JOIN_HINTS = False
     TABLE_HINTS = True
     DUPLICATE_KEY_UPDATE_WITH_SET = False

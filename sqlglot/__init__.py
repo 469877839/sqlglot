@@ -15,6 +15,14 @@ import typing as t
 
 from sqlglot import expressions as exp
 from sqlglot.dialects.dialect import Dialect as Dialect, Dialects as Dialects
+from sqlglot.diagnostics import (
+    Category as Category,
+    ConversionDiagnostic as ConversionDiagnostic,
+    ConversionPolicy as ConversionPolicy,
+    DiagnosticCollection as DiagnosticCollection,
+    LossKind as LossKind,
+    LossyConversionError as LossyConversionError,
+)
 from sqlglot.diff import diff as diff
 from sqlglot.errors import (
     ErrorLevel as ErrorLevel,
@@ -200,3 +208,44 @@ def transpile(
         write.generate(expression, copy=False, **opts) if expression else ""
         for expression in parse(sql, read, error_level=error_level)
     ]
+
+
+def transpile_with_diagnostics(
+    sql: str,
+    read: DialectType = None,
+    write: DialectType = None,
+    identity: bool = True,
+    error_level: ErrorLevel | None = None,
+    diagnostics: ConversionPolicy = ConversionPolicy.COLLECT,
+    **opts: Unpack[GeneratorArgs],
+) -> list[DiagnosticCollection]:
+    """
+    Like `transpile`, but returns the generated SQL of each statement together with the
+    structured lossy-conversion diagnostics it produced. A single generator is reused
+    across all statements.
+
+    Args:
+        sql: the SQL code string to transpile.
+        read: the source dialect used to parse the input string.
+        write: the target dialect into which the input should be transformed.
+        identity: if set to `True` and if the target dialect is not specified the source
+            dialect will be used as both the source and the target dialect.
+        error_level: the desired error level of the parser.
+        diagnostics: the `ConversionPolicy` to apply, defaults to `ConversionPolicy.COLLECT`.
+        **opts: other `sqlglot.generator.Generator` options.
+
+    Returns:
+        One `DiagnosticCollection` (SQL plus diagnostics) per parsed statement.
+    """
+    write = (read if write is None else write) if identity else write
+    generator = Dialect.get_or_raise(write).generator(diagnostics=diagnostics, **opts)
+    results: list[DiagnosticCollection] = []
+    for expression in parse(sql, read, error_level=error_level):
+        if not expression:
+            results.append(DiagnosticCollection(sql=""))
+            continue
+        generated = generator.generate(expression, copy=False)
+        results.append(
+            DiagnosticCollection(sql=generated, diagnostics=list(generator.diagnostics))
+        )
+    return results

@@ -8,6 +8,15 @@ from decimal import Decimal
 from functools import reduce, wraps
 
 from sqlglot import exp
+from sqlglot.diagnostics import (
+    Category,
+    ConversionDiagnostic,
+    ConversionPolicy,
+    LossKind,
+    LossyConversionError,
+    SourceResolver,
+    assign_source_ids,
+)
 from sqlglot.errors import ErrorLevel, UnsupportedError, concat_messages
 from sqlglot.expressions import apply_index_offset
 from sqlglot.expressions.core import maybe_parse
@@ -133,6 +142,14 @@ class Generator:
             Default: 80
         comments: Whether to preserve comments in the output SQL code.
             Default: True
+        diagnostics: When set, enables structured lossy-conversion diagnostics. The
+            `ConversionPolicy` controls how they are surfaced:
+            `ALLOW` (lossy SQL is generated silently), `COLLECT` (lossy SQL is generated
+            and each loss is logged plus recorded in `self.diagnostics`) or `REJECT`
+            (`LossyConversionError` is raised). When `None` (the default), only the
+            existing `unsupported` warnings are emitted, preserving legacy behavior.
+            Enabling diagnostics makes the generator work on a copy of the input tree so
+            provenance tagging never mutates the caller's AST.
     """
 
     TRANSFORMS: t.ClassVar[dict[type[exp.Expr], t.Callable[..., str]]] = {
@@ -684,6 +701,29 @@ class Generator:
 
     UNSUPPORTED_TYPES: t.ClassVar[set[exp.DType]] = set()
 
+    # DTypes that carry time-zone semantics
+    TZ_AWARE_TYPES: t.ClassVar[tuple[exp.DType, ...]] = (
+        exp.DType.TIMETZ,
+        exp.DType.TIMESTAMPTZ,
+        exp.DType.TIMESTAMPLTZ,
+    )
+
+    # SQL type names that preserve time-zone semantics when a tz-aware DType is
+    # mapped through `TYPE_MAPPING`. Dialects whose plain TIMESTAMP is tz-aware
+    # (e.g. BigQuery, MySQL) extend this set.
+    TZ_AWARE_TYPE_SQL: t.ClassVar[frozenset[str]] = frozenset(
+        {
+            "TIMESTAMP WITH TIME ZONE",
+            "TIME WITH TIME ZONE",
+            "TIMESTAMPTZ",
+            "TIMETZ",
+            "TIMESTAMPLTZ",
+            "TIMESTAMP_LTZ",
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+            "DATETIMEOFFSET",
+        }
+    )
+
     # mapping of DType to its default parameters, bounds
     TYPE_PARAM_SETTINGS: t.ClassVar[
         dict[exp.DType, tuple[tuple[int, ...], tuple[int | None, ...]]]
@@ -925,6 +965,9 @@ class Generator:
         "comments",
         "dialect",
         "unsupported_messages",
+        "diagnostics_policy",
+        "diagnostics",
+        "_diag_resolver",
         "_escaped_quote_end",
         "_escaped_byte_quote_end",
         "_escaped_identifier_end",
@@ -950,6 +993,7 @@ class Generator:
         max_text_width: int = 80,
         comments: bool = True,
         dialect: DialectType = None,
+        diagnostics: ConversionPolicy | None = None,
     ):
         import sqlglot
         import sqlglot.dialects.dialect
@@ -972,6 +1016,9 @@ class Generator:
         )
 
         self.unsupported_messages: list[str] = []
+        self.diagnostics_policy = diagnostics
+        self.diagnostics: list[ConversionDiagnostic] = []
+        self._diag_resolver: SourceResolver | None = None
         self._escaped_quote_end: str = (
             self.dialect.tokenizer_class.STRING_ESCAPES[0] + self.dialect.QUOTE_END
         )
@@ -1009,16 +1056,27 @@ class Generator:
         Returns:
             The SQL string corresponding to `expression`.
         """
-        if copy:
+        if self.diagnostics_policy is not None:
+            # Diagnostics rely on provenance tags; always work on a copy so the
+            # caller's tree is never mutated, even when `copy=False` was requested.
+            original = expression
+            working = assign_source_ids(expression.copy())
+            self._diag_resolver = SourceResolver(original, working)
+            expression = working
+        elif copy:
             expression = expression.copy()
 
         expression = self.preprocess(expression)
 
         self.unsupported_messages = []
+        self.diagnostics = []
         sql = self.sql(expression).strip()
 
         if self.pretty:
             sql = sql.replace(self.SENTINEL_LINE_BREAK, "\n")
+
+        if self.diagnostics_policy == ConversionPolicy.REJECT and self.diagnostics:
+            raise LossyConversionError(self.diagnostics)
 
         if self.unsupported_level == ErrorLevel.IGNORE:
             return sql
@@ -1057,6 +1115,57 @@ class Generator:
         if self.unsupported_level == ErrorLevel.IMMEDIATE:
             raise UnsupportedError(message)
         self.unsupported_messages.append(message)
+
+    def diagnose(
+        self,
+        category: Category,
+        node: exp.Expr,
+        action: str,
+        loss: LossKind,
+        message: str,
+    ) -> None:
+        """Record a structured lossy-conversion diagnostic.
+
+        When diagnostics are disabled (`ConversionPolicy` is `None`), this falls back
+        to the legacy free-form `unsupported` warning so existing behavior is unchanged.
+        Otherwise, the node is resolved back to the originating AST node (following its
+        provenance across multi-step transformations) and a `ConversionDiagnostic` is
+        recorded according to the active `ConversionPolicy`.
+        """
+        if self.diagnostics_policy is None:
+            self.unsupported(message)
+            return
+        if self.diagnostics_policy == ConversionPolicy.ALLOW:
+            # The caller explicitly accepts the loss: generate silently, record nothing.
+            return
+
+        resolver = self._diag_resolver
+        source_node = resolver.resolve(node) if resolver else None
+        source_id = resolver.source_id(node) if resolver else None
+        original = source_node if source_node is not None else node
+
+        try:
+            node_sql = original.sql()
+        except Exception:
+            node_sql = type(original).__name__
+
+        diagnostic = ConversionDiagnostic(
+            category=category,
+            node=original,
+            node_sql=node_sql,
+            target_dialect=self.dialect.__class__.__name__,
+            action=action,
+            loss=loss,
+            message=message,
+            source_id=source_id,
+        )
+        self.diagnostics.append(diagnostic)
+
+        if self.diagnostics_policy == ConversionPolicy.REJECT:
+            # `generate` raises `LossyConversionError` once generation completes.
+            return
+        # COLLECT: surface the same warning text the legacy path would have logged
+        self.unsupported(message)
 
     def sep(self, sep: str = " ") -> str:
         return f"{sep.strip()}\n" if self.pretty else sep
@@ -1798,9 +1907,15 @@ class Generator:
                 else None
             )
             if isinstance(value, (int, Decimal)) and value > bound:
-                self.unsupported(
-                    f"{type_value.value} parameter {param_value.name} exceeds "
-                    f"{self.dialect.__class__.__name__}'s maximum of {bound}; capping"
+                self.diagnose(
+                    Category.TEMPORAL,
+                    expression,
+                    action=f"capped {type_value.value} parameter {param_value.name} to {bound}",
+                    loss=LossKind.PRECISION,
+                    message=(
+                        f"{type_value.value} parameter {param_value.name} exceeds "
+                        f"{self.dialect.__class__.__name__}'s maximum of {bound}; capping"
+                    ),
                 )
                 params[i] = exp.DataTypeParam(this=exp.Literal.number(bound))
 
@@ -1844,6 +1959,22 @@ class Generator:
                 self.TYPE_MAPPING.get(type_value, type_value.value)
                 if isinstance(type_value, exp.DType)
                 else type_value
+            )
+
+        if (
+            type_value in self.TZ_AWARE_TYPES
+            and not self.TZ_TO_WITH_TIME_ZONE
+            and str(type_sql).upper() not in self.TZ_AWARE_TYPE_SQL
+        ):
+            self.diagnose(
+                Category.TEMPORAL,
+                expression,
+                action=f"mapped {type_value.value} to {type_sql}",
+                loss=LossKind.TIMEZONE,
+                message=(
+                    f"{type_value.value} is generated as {type_sql}, which drops time zone "
+                    f"semantics when targeting {self.dialect.__class__.__name__}"
+                ),
             )
 
         if interior:
@@ -1932,7 +2063,13 @@ class Generator:
             and op_type in (exp.Except, exp.Intersect)
             and not self.EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE
         ):
-            self.unsupported(f"{op_name} ALL is not supported")
+            self.diagnose(
+                Category.SET_OPERATION,
+                expression,
+                action=f"emitted {op_name} ALL although the target dialect does not support it",
+                loss=LossKind.SET_OPERATION,
+                message=f"{op_name} ALL is not supported",
+            )
 
         default_distinct = self.dialect.SET_OP_DISTINCT_BY_DEFAULT[op_type]
 
@@ -3408,8 +3545,12 @@ class Generator:
                 and (not spec or spec.text("kind").upper() == "ROWS")
             ):
                 if window_this and spec:
-                    self.unsupported(
-                        f"'{nulls_sort_change.strip()}' translation not supported in window function {window_this.sql_name()}"
+                    self.diagnose(
+                        Category.NULL_ORDERING,
+                        expression,
+                        action=f"dropped {nulls_sort_change.strip()} clause in window function {window_this.sql_name()}",
+                        loss=LossKind.NULL_ORDERING,
+                        message=f"'{nulls_sort_change.strip()}' translation not supported in window function {window_this.sql_name()}",
                     )
                     nulls_sort_change = ""
                 elif self.NULL_ORDERING_SUPPORTED is False and (
@@ -3423,16 +3564,33 @@ class Generator:
                     if isinstance(ancestor, exp.Window):
                         ancestor = ancestor.this
                     if isinstance(ancestor, exp.AggFunc):
-                        self.unsupported(
-                            f"'{nulls_sort_change.strip()}' translation not supported for aggregate function {ancestor.sql_name()} with {sort_order} sort order"
+                        self.diagnose(
+                            Category.NULL_ORDERING,
+                            expression,
+                            action=f"dropped {nulls_sort_change.strip()} clause for aggregate function {ancestor.sql_name()} with {sort_order} sort order",
+                            loss=LossKind.NULL_ORDERING,
+                            message=f"'{nulls_sort_change.strip()}' translation not supported for aggregate function {ancestor.sql_name()} with {sort_order} sort order",
                         )
                         nulls_sort_change = ""
                 elif self.NULL_ORDERING_SUPPORTED is None:
                     if expression.this.is_int:
-                        self.unsupported(
-                            f"'{nulls_sort_change.strip()}' translation not supported with positional ordering"
+                        self.diagnose(
+                            Category.NULL_ORDERING,
+                            expression,
+                            action=f"dropped {nulls_sort_change.strip()} clause in positional ORDER BY",
+                            loss=LossKind.NULL_ORDERING,
+                            message=f"'{nulls_sort_change.strip()}' translation not supported with positional ordering",
                         )
-                    elif not isinstance(expression.this, exp.Rand):
+                    elif isinstance(expression.this, exp.Rand):
+                        # A CASE-based simulation would re-evaluate RAND() with different values
+                        self.diagnose(
+                            Category.NULL_ORDERING,
+                            expression,
+                            action=f"dropped {nulls_sort_change.strip()} clause on a non-deterministic sort expression",
+                            loss=LossKind.NULL_ORDERING,
+                            message=f"'{nulls_sort_change.strip()}' translation not supported with RAND() ordering",
+                        )
+                    else:
                         resolved = self._resolve_ordered_for_null_ordering_simulation(expression)
                         target = self.sql(resolved) if resolved is not None else this
                         null_sort_order = " DESC" if nulls_sort_change == " NULLS FIRST" else ""
@@ -5568,7 +5726,16 @@ class Generator:
                     # direction, e.g. 0-based -1 (before the last element) is 1-based -2
                     position = exp.Literal.number(value - offset)
             else:
-                self.unsupported("ARRAY_INSERT position can only be converted if it's a literal")
+                self.diagnose(
+                    Category.ARRAY_INDEXING,
+                    expression,
+                    action=(
+                        f"left ARRAY_INSERT position '{expression.args.get('position').sql()}' "
+                        f"unconverted between index conventions"
+                    ),
+                    loss=LossKind.INDEXING,
+                    message="ARRAY_INSERT position can only be converted if it's a literal",
+                )
 
         return self.func("ARRAY_INSERT", this, position, expression.expression)
 
