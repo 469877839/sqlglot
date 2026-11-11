@@ -200,3 +200,12 @@ def transpile(
         write.generate(expression, copy=False, **opts) if expression else ""
         for expression in parse(sql, read, error_level=error_level)
     ]
+
+
+def __getattr__(name: str) -> t.Any:
+    # Lazily import the schema-impact entry point so importing sqlglot stays cheap.
+    if name == "analyze_impact":
+        from sqlglot.impact import analyze_impact
+
+        return analyze_impact
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

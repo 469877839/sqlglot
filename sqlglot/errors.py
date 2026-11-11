@@ -101,6 +101,10 @@ class ExecuteError(SqlglotError):
     pass
 
 
+class ImpactAnalysisError(SqlglotError):
+    pass
+
+
 def highlight_sql(
     sql: str,
     positions: list[tuple[int, int]],
